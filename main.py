@@ -1,110 +1,97 @@
-import re
+import os
+import logging
 from pyrogram import Client, filters
+from pyrogram.types import Message
 from PyPDF2 import PdfMerger
-from io import BytesIO
+import tempfile
 
-# Initialize the bot with the API credentials
-app = Client("my_bot", api_id="your_api_id", api_hash="your_api_hash")
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Regular expression to match Telegram public post links
-POST_LINK_REGEX = r"https://t\.me/(\w+)/(\d+)"
+# Fetch API ID, API HASH, and BOT TOKEN from environment variables
+API_ID = os.getenv('API_ID')
+API_HASH = os.getenv('API_HASH')
+BOT_TOKEN = os.getenv('BOT_TOKEN')
 
-# Dictionary to store user PDFs temporarily
-user_pdfs = {}
+# Check if the environment variables are set correctly
+if not API_ID or not API_HASH or not BOT_TOKEN:
+    logger.error("API_ID, API_HASH, or BOT_TOKEN are not set in the environment variables!")
+    exit(1)
 
-# Function to handle the /start command (welcome message)
-@app.on_message(filters.command("start"))
-async def start(client, message):
-    welcome_text = (
-        "Welcome to the PDF Merge Bot! 🧑‍💻\n\n"
-        "I can help you merge PDF files. Just send me your PDF files and use the /merge command "
-        "to merge them.\n\n"
-        "Also, if you send a public post link from a Telegram channel, I'll forward it to you!"
-    )
-    await message.reply(welcome_text)
+# Create Pyrogram User Client for public channel access
+user_client = Client("user_session", api_id=API_ID, api_hash=API_HASH)
 
-# Function to handle received messages with post links
-@app.on_message(filters.text)
-async def handle_post_link(client, message):
-    # Check if the message contains a valid post link
-    match = re.match(POST_LINK_REGEX, message.text)
-    if match:
-        # Extract the channel username and post ID from the link
-        channel_username = match.group(1)
-        post_id = match.group(2)
+# Create Pyrogram Bot Client for bot functionality
+bot_client = Client("bot_session", bot_token=BOT_TOKEN)
 
-        try:
-            # Fetch the post from the channel using the channel username and post ID
-            forwarded_message = await client.get_messages(channel_username, message_ids=post_id)
-            
-            # Forward the fetched message to the user's chat
-            await client.forward_messages(chat_id=message.chat.id, from_chat_id=channel_username, message_ids=post_id)
-        except Exception as e:
-            # Handle exceptions (e.g., invalid link, bot lacks permission, etc.)
-            await message.reply(f"Sorry, I couldn't fetch the post. Error: {str(e)}")
+# Temporary storage for PDFs
+pdf_files = []
 
-# Function to handle PDF file uploads
-@app.on_message(filters.document)
-async def handle_pdf(client, message):
-    # Check if the document is a PDF
-    if message.document.mime_type == "application/pdf":
-        user_id = message.from_user.id
-        
-        # Initialize the PDF list if the user hasn't sent any PDFs yet
-        if user_id not in user_pdfs:
-            user_pdfs[user_id] = []
+# Command to start the bot and welcome message
+@bot_client.on_message(filters.command("start"))
+async def start_command(client, message):
+    await message.reply("Welcome! Send me a link to a public post or a PDF to merge.")
 
-        # Download the PDF file
-        file = await message.download()
-
-        # Add the PDF to the user's list
-        user_pdfs[user_id].append(file)
-
-        # Notify the user that the PDF was received
-        await message.reply("PDF file received! You can send more PDFs or type /merge to combine them.")
-
-# Function to handle the /merge command
-@app.on_message(filters.command("merge"))
+# Command to merge PDFs
+@bot_client.on_message(filters.command("merge"))
 async def merge_pdfs(client, message):
-    user_id = message.from_user.id
-
-    # Check if the user has any PDFs to merge
-    if user_id not in user_pdfs or len(user_pdfs[user_id]) == 0:
-        await message.reply("You haven't uploaded any PDFs yet! Please send PDFs first.")
+    if len(pdf_files) < 2:
+        await message.reply("Please send at least two PDFs to merge.")
         return
 
-    # Prepare a PdfMerger object to merge the PDFs
     merger = PdfMerger()
 
-    # Add all PDFs for the user to the merger
-    for pdf_file in user_pdfs[user_id]:
-        merger.append(pdf_file)
+    # Merge all the PDFs in the list
+    for pdf in pdf_files:
+        merger.append(pdf)
 
-    # Create a BytesIO object to store the merged PDF
-    merged_pdf = BytesIO()
-    merger.write(merged_pdf)
-    merged_pdf.seek(0)
+    # Save the merged PDF to a temporary file
+    merged_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    merger.write(merged_pdf.name)
+    merger.close()
 
     # Send the merged PDF back to the user
-    await client.send_document(chat_id=message.chat.id, document=merged_pdf, caption="Here is your merged PDF!")
+    with open(merged_pdf.name, "rb") as f:
+        await message.reply_document(f)
 
-    # Clean up the temporary files and reset the user's list of PDFs
-    merger.close()
-    user_pdfs[user_id] = []
+    # Clean up the temporary PDF file
+    os.remove(merged_pdf.name)
+    pdf_files.clear()
 
-# Function to handle the /clear command (clear all PDFs for the user)
-@app.on_message(filters.command("clear"))
+# Command to clear stored PDFs
+@bot_client.on_message(filters.command("clear"))
 async def clear_pdfs(client, message):
-    user_id = message.from_user.id
+    pdf_files.clear()
+    await message.reply("All stored PDFs have been cleared.")
 
-    # Check if the user has any PDFs stored
-    if user_id not in user_pdfs or len(user_pdfs[user_id]) == 0:
-        await message.reply("You have no PDFs to clear.")
-        return
+# Function to handle public post link and send it back
+@bot_client.on_message(filters.regex(r"https?://t.me/[\w+]+/[\d]+"))
+async def send_public_post(client, message):
+    post_link = message.text
+    channel_username = post_link.split("/")[3]  # Extract channel username
+    post_id = post_link.split("/")[-1]  # Extract post ID
 
-    # Clear the user's PDF list
-    user_pdfs[user_id] = []
-    await message.reply("All your uploaded PDFs have been cleared.")
+    try:
+        # Fetch the message from the public channel using user client
+        async with user_client:
+            public_message = await user_client.get_messages(channel_username, message_ids=int(post_id))
 
-# Start the bot
-app.run()
+        # Forward the message to the user
+        await message.reply(public_message.text or "No text content in this post.")
+    
+    except Exception as e:
+        logger.error(f"Error fetching public post: {e}")
+        await message.reply("Sorry, I couldn't fetch the post. Please check the link.")
+
+# Handle PDF files uploaded by the user
+@bot_client.on_message(filters.document)
+async def handle_pdf(client, message: Message):
+    if message.document.mime_type == "application/pdf":
+        file_path = await message.download()
+        pdf_files.append(file_path)
+        await message.reply("PDF added to the merge list.")
+
+# Run the bot
+if __name__ == "__main__":
+    bot_client.run()
