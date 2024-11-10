@@ -3,10 +3,14 @@ FROM python:3.9-slim
 
 # Install system dependencies (including gcc) needed to build some Python packages
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    gcc \
-    libffi-dev \
+    libglib2.0-0 \
+    libsm6 \
+    libxrender1 \
+    libxext6 \
     && rm -rf /var/lib/apt/lists/*
+
+# Install required Python packages
+COPY requirements.txt /app/
 
 # Set the working directory in the container
 WORKDIR /app
