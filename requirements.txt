@@ -1,4 +1,4 @@
 pyrogram==2.0.4
-tgcrypto==1.2.0
+tgcrypto
 Flask==2.3.2
 pydantic==1.8.2
